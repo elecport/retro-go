@@ -36,6 +36,7 @@
  */
 
 #include "doomdef.h"
+#include "doomstat.h"
 #include "r_main.h"
 #include "r_draw.h"
 #include "m_bbox.h"
@@ -45,25 +46,29 @@
 #include "r_filter.h"
 #include "lprintf.h"
 
+static const byte gammatbl[] = {
+  0x02, 0x03, 0x03, 0x04, 0x04, 0x05, 0x05, 0x05, 0x06, 0x06, 0x06, 0x07, 0x07, 0x07, 0x07, 0x08,
+  0x08, 0x08, 0x08, 0x08, 0x09, 0x09, 0x09, 0x09, 0x09, 0x09, 0x0A, 0x0A, 0x0A, 0x0A, 0x0A, 0x0A,
+  0x0A, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0C, 0x0C, 0x0C, 0x0C, 0x0C, 0x0C,
+  0x0C, 0x0C, 0x0C, 0x0C, 0x0C, 0x0C, 0x0C, 0x0C, 0x0D, 0x0D, 0x0D, 0x0D, 0x0D, 0x0D, 0x0D, 0x0D,
+  0x0D, 0x0D, 0x0D, 0x0D, 0x0D, 0x0D, 0x0D, 0x0D, 0x0D, 0x0D, 0x0D, 0x0D, 0x0D, 0x0D, 0x0D, 0x0D,
+  0x0D, 0x0D, 0x0D, 0x0D, 0x0D, 0x0D, 0x0D, 0x0D, 0x0D, 0x0D, 0x0D, 0x0D, 0x0D, 0x0D, 0x0D, 0x0D,
+  0x0D, 0x0D, 0x0D, 0x0D, 0x0D, 0x0D, 0x0D, 0x0D, 0x0D, 0x0D, 0x0D, 0x0D, 0x0D, 0x0D, 0x0D, 0x0D,
+  0x0D, 0x0D, 0x0D, 0x0D, 0x0D, 0x0C, 0x0C, 0x0C, 0x0C, 0x0C, 0x0C, 0x0C, 0x0C, 0x0C, 0x0C, 0x0C,
+  0x0C, 0x0C, 0x0C, 0x0C, 0x0C, 0x0C, 0x0C, 0x0C, 0x0C, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B,
+  0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0A, 0x0A, 0x0A, 0x0A, 0x0A, 0x0A, 0x0A,
+  0x0A, 0x0A, 0x0A, 0x0A, 0x0A, 0x0A, 0x09, 0x09, 0x09, 0x09, 0x09, 0x09, 0x09, 0x09, 0x09, 0x09,
+  0x09, 0x09, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x07, 0x07, 0x07,
+  0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x06, 0x06, 0x06, 0x06, 0x06, 0x06, 0x06, 0x06, 0x06,
+  0x06, 0x05, 0x05, 0x05, 0x05, 0x05, 0x05, 0x05, 0x05, 0x05, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04,
+  0x04, 0x04, 0x04, 0x03, 0x03, 0x03, 0x03, 0x03, 0x03, 0x03, 0x03, 0x02, 0x02, 0x02, 0x02, 0x02,
+  0x02, 0x02, 0x02, 0x02, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00,
+};
+
 // Each screen is [SCREENWIDTH*SCREENHEIGHT];
 screeninfo_t screens[NUM_SCREENS];
 
 int usegamma;
-
-/*
- * V_InitColorTranslation
- *
- * Loads the color translation tables from predefined lumps at game start
- * No return
- *
- * Used for translating text colors from the red palette range
- * to other colors. The first nine entries can be used to dynamically
- * switch the output of text color thru the HUlib_drawText routine
- * by embedding ESCn in the text to obtain color n. Symbols for n are
- * provided in v_video.h.
- *
- * cphipps - constness of crdef_t stuff fixed
- */
 
 typedef struct {
   const char *name;
@@ -84,13 +89,6 @@ static crdef_t crdefs[CR_LIMIT] = {
   {"CRYELLOW", NULL},
   {"CRBLUE2",  NULL},
 };
-
-// killough 5/2/98: tiny engine driven by table above
-void V_InitColorTranslation(void)
-{
-  for (size_t i = 0; i < CR_LIMIT; i++)
-    crdefs[i].map = W_CacheLumpName(crdefs[i].name);
-}
 
 //
 // V_CopyRect
@@ -223,12 +221,14 @@ static void FUNC_V_DrawBackground(const char* flatname, int scrn)
 // No return
 //
 
-void V_Init (void)
+void V_Init(int width, int height, video_mode_t mode)
 {
-  int  i;
+  // Load color translation tables from predefined lumps
+  for (int i = 0; i < CR_LIMIT; i++)
+    crdefs[i].map = W_CacheLumpName(crdefs[i].name);
 
-  // reset the all
-  for (i = 0; i<NUM_SCREENS; i++) {
+  // Reset all screens
+  for (int i = 0; i < NUM_SCREENS; i++) {
     screens[i].data = NULL;
     screens[i].not_on_heap = false;
     screens[i].width = 0;
@@ -236,6 +236,14 @@ void V_Init (void)
     screens[i].byte_pitch = 0;
     screens[i].short_pitch = 0;
     screens[i].int_pitch = 0;
+  }
+
+  // Init host video if we're drawing
+  if (!nodrawers)
+  {
+    V_InitMode(mode);
+    I_InitGraphics();
+    V_AllocScreens();
   }
 }
 
@@ -489,183 +497,86 @@ static void FUNC_V_DrawNumPatch(int x, int y, int scrn, int lump,
 }
 
 #ifndef NOTRUECOLOR
-unsigned short *V_Palette15 = NULL;
-unsigned short *V_Palette16 = NULL;
-unsigned int *V_Palette32 = NULL;
-static unsigned short *Palettes15 = NULL;
-static unsigned short *Palettes16 = NULL;
-static unsigned int *Palettes32 = NULL;
-static int currentPaletteIndex = 0;
+void *V_Palette = NULL;
+#endif
 
 //
-// V_UpdateTrueColorPalette
+// V_BuildPalette
 //
-void V_UpdateTrueColorPalette(video_mode_t mode) {
-  int i, w, p;
-  byte r,g,b;
-  int nr,ng,nb;
-  float t;
-  int paletteNum = currentPaletteIndex;
-  static int usegammaOnLastPaletteGeneration = -1;
-
+void *V_BuildPalette(int paletteNum, int bitdepth)
+{
   int pplump = W_GetNumForName("PLAYPAL");
-  int gtlump = W_CheckNumForNameNs("GAMMATBL",ns_prboom);
-  const byte *pal = W_CacheLumpNum(pplump);
-  const byte *gtable = W_CacheLumpNum(gtlump) + 256*(usegamma);
+  const byte *playpal = W_CacheLumpNum(pplump);
+  const byte *pal = playpal + MIN(paletteNum * 768, W_LumpLength(pplump) - 768);
 
-  int numPals = W_LumpLength(pplump) / (3*256);
-  const float dontRoundAbove = 220;
-  float roundUpR, roundUpG, roundUpB;
+  byte *palette = malloc(256 * ((bitdepth + 1) / 8));
 
-  if (usegammaOnLastPaletteGeneration != usegamma) {
-    if (Palettes15) free(Palettes15);
-    if (Palettes16) free(Palettes16);
-    if (Palettes32) free(Palettes32);
-    Palettes15 = NULL;
-    Palettes16 = NULL;
-    Palettes32 = NULL;
-    usegammaOnLastPaletteGeneration = usegamma;
-  }
+  for (int i = 0; i < 256; i++)
+  {
+    int r = *pal++;
+    int g = *pal++;
+    int b = *pal++;
 
-  if (mode == VID_MODE32) {
-    if (!Palettes32) {
-      // set int palette
-      Palettes32 = (int*)malloc(numPals*256*sizeof(int)*VID_NUMCOLORWEIGHTS);
-      for (p=0; p<numPals; p++) {
-        for (i=0; i<256; i++) {
-          r = gtable[pal[(256*p+i)*3+0]];
-          g = gtable[pal[(256*p+i)*3+1]];
-          b = gtable[pal[(256*p+i)*3+2]];
-
-          // ideally, we should always round up, but very bright colors
-          // overflow the blending adds, so they don't get rounded.
-          roundUpR = (r > dontRoundAbove) ? 0 : 0.5f;
-          roundUpG = (g > dontRoundAbove) ? 0 : 0.5f;
-          roundUpB = (b > dontRoundAbove) ? 0 : 0.5f;
-
-          for (w=0; w<VID_NUMCOLORWEIGHTS; w++) {
-            t = (float)(w)/(float)(VID_NUMCOLORWEIGHTS-1);
-            nr = (int)(r*t+roundUpR);
-            ng = (int)(g*t+roundUpG);
-            nb = (int)(b*t+roundUpB);
-            Palettes32[((p*256+i)*VID_NUMCOLORWEIGHTS)+w] = (
-              (nr<<16) | (ng<<8) | nb
-            );
-          }
-        }
-      }
+    if (usegamma > 0)
+    {
+      r = MIN(r + gammatbl[r] * usegamma, 0xFF);
+      g = MIN(g + gammatbl[g] * usegamma, 0xFF);
+      b = MIN(b + gammatbl[b] * usegamma, 0xFF);
     }
-    V_Palette32 = Palettes32 + paletteNum*256*VID_NUMCOLORWEIGHTS;
-  }
-  else if (mode == VID_MODE16) {
-    if (!Palettes16) {
-      // set short palette
-      Palettes16 = (short*)malloc(numPals*256*sizeof(short)*VID_NUMCOLORWEIGHTS);
-      for (p=0; p<numPals; p++) {
-        for (i=0; i<256; i++) {
-          r = gtable[pal[(256*p+i)*3+0]];
-          g = gtable[pal[(256*p+i)*3+1]];
-          b = gtable[pal[(256*p+i)*3+2]];
 
-          // ideally, we should always round up, but very bright colors
-          // overflow the blending adds, so they don't get rounded.
-          roundUpR = (r > dontRoundAbove) ? 0 : 0.5f;
-          roundUpG = (g > dontRoundAbove) ? 0 : 0.5f;
-          roundUpB = (b > dontRoundAbove) ? 0 : 0.5f;
-
-          for (w=0; w<VID_NUMCOLORWEIGHTS; w++) {
-            t = (float)(w)/(float)(VID_NUMCOLORWEIGHTS-1);
-            nr = (int)((r>>3)*t+roundUpR);
-            ng = (int)((g>>2)*t+roundUpG);
-            nb = (int)((b>>3)*t+roundUpB);
-            Palettes16[((p*256+i)*VID_NUMCOLORWEIGHTS)+w] = (
-              (nr<<11) | (ng<<5) | nb
-            );
-          }
-        }
-      }
+    if (bitdepth == 32)
+    {
+        ((uint32_t*)palette)[i] = ((r<<16) | (g<<8) | b);
     }
-    V_Palette16 = Palettes16 + paletteNum*256*VID_NUMCOLORWEIGHTS;
-  }
-  else if (mode == VID_MODE15) {
-    if (!Palettes15) {
-      // set short palette
-      Palettes15 = (short*)malloc(numPals*256*sizeof(short)*VID_NUMCOLORWEIGHTS);
-      for (p=0; p<numPals; p++) {
-        for (i=0; i<256; i++) {
-          r = gtable[pal[(256*p+i)*3+0]];
-          g = gtable[pal[(256*p+i)*3+1]];
-          b = gtable[pal[(256*p+i)*3+2]];
-
-          // ideally, we should always round up, but very bright colors
-          // overflow the blending adds, so they don't get rounded.
-          roundUpR = (r > dontRoundAbove) ? 0 : 0.5f;
-          roundUpG = (g > dontRoundAbove) ? 0 : 0.5f;
-          roundUpB = (b > dontRoundAbove) ? 0 : 0.5f;
-
-          for (w=0; w<VID_NUMCOLORWEIGHTS; w++) {
-            t = (float)(w)/(float)(VID_NUMCOLORWEIGHTS-1);
-            nr = (int)((r>>3)*t+roundUpR);
-            ng = (int)((g>>3)*t+roundUpG);
-            nb = (int)((b>>3)*t+roundUpB);
-            Palettes15[((p*256+i)*VID_NUMCOLORWEIGHTS)+w] = (
-              (nr<<10) | (ng<<5) | nb
-            );
-          }
-        }
-      }
+    else if (bitdepth == 24)
+    {
+        palette[i*3+0] = r;
+        palette[i*3+1] = g;
+        palette[i*3+2] = b;
     }
-    V_Palette15 = Palettes15 + paletteNum*256*VID_NUMCOLORWEIGHTS;
+    else if (bitdepth == 16)
+    {
+        int nr = r >> 3, ng = g >> 2, nb = b >> 3;
+        ((uint16_t*)palette)[i] = ((nr<<11) | (ng<<5) | nb);
+    }
+    else if (bitdepth == 15)
+    {
+        int nr = r >> 3, ng = g >> 3, nb = b >> 3;
+        ((uint16_t*)palette)[i] = ((nr<<10) | (ng<<5) | nb);
+    }
+#if 0
+    This is kept for reference if we ever need to fix truecolor rendering.
+    float roundUpR = (r > dontRoundAbove) ? 0 : 0.5f;
+    float roundUpG = (g > dontRoundAbove) ? 0 : 0.5f;
+    float roundUpB = (b > dontRoundAbove) ? 0 : 0.5f;
+
+    for (int w=0; w<VID_NUMCOLORWEIGHTS; w++) {
+      int t = (float)(w)/(float)(VID_NUMCOLORWEIGHTS-1);
+      int nr = (int)(r*t+roundUpR);
+      int ng = (int)(g*t+roundUpG);
+      int nb = (int)(b*t+roundUpB);
+      ((uint32_t*)palette)[(i*VID_NUMCOLORWEIGHTS)+w] = ((nr<<16) | (ng<<8) | nb);
+    }
+#endif
   }
 
   W_UnlockLumpNum(pplump);
-  W_UnlockLumpNum(gtlump);
+
+  return palette;
 }
 
-
-//---------------------------------------------------------------------------
-// V_DestroyTrueColorPalette
-//---------------------------------------------------------------------------
-static void V_DestroyTrueColorPalette(video_mode_t mode) {
-  if (mode == VID_MODE15) {
-    if (Palettes15) free(Palettes15);
-    Palettes15 = NULL;
-    V_Palette15 = NULL;
-  }
-  if (mode == VID_MODE16) {
-    if (Palettes16) free(Palettes16);
-    Palettes16 = NULL;
-    V_Palette16 = NULL;
-  }
-  if (mode == VID_MODE32) {
-    if (Palettes32) free(Palettes32);
-    Palettes32 = NULL;
-    V_Palette32 = NULL;
-  }
-}
-
-void V_DestroyUnusedTrueColorPalettes(void) {
-  if (V_GetMode() != VID_MODE15) V_DestroyTrueColorPalette(VID_MODE15);
-  if (V_GetMode() != VID_MODE16) V_DestroyTrueColorPalette(VID_MODE16);
-  if (V_GetMode() != VID_MODE32) V_DestroyTrueColorPalette(VID_MODE32);
-}
-#endif
 
 //
 // V_SetPalette
 //
-// CPhipps - New function to set the palette to palette number pal.
-// Handles loading of PLAYPAL and calls I_SetPalette
-
 void V_SetPalette(int pal)
 {
-#ifndef NOTRUECOLOR
-  currentPaletteIndex = pal;
-  if (V_GetMode() != VID_MODE8 && W_CheckNumForName("PLAYPAL") != -1) {
-    V_UpdateTrueColorPalette(V_GetMode());
+  #ifndef NOTRUECOLOR
+  if (V_GetMode() != VID_MODE8) {
+    if (V_Palette) Z_Free(V_Palette);
+    V_Palette = V_BuildPalette(pal, V_GetNumPixelBits());
   }
-#endif
-
+  #endif
   I_SetPalette(pal);
 }
 
@@ -750,8 +661,8 @@ static void NULL_DrawBackground(const char *flatname, int n) {}
 static void NULL_DrawNumPatch(int x, int y, int scrn, int lump, int cm, enum patch_translation_e flags) {}
 static void NULL_PlotPixel(int scrn, int x, int y, byte color) {}
 
-const char *default_videomode;
-static video_mode_t current_videomode = VID_MODE8;
+video_mode_t default_videomode = VID_MODE8;
+video_mode_t current_videomode = VID_MODE8;
 
 V_CopyRect_f V_CopyRect = NULL_CopyRect;
 V_FillRect_f V_FillRect = NULL_FillRect;

@@ -118,72 +118,72 @@ char *AddDefaultExtension(char *path, const char *ext)
 //
 // proff - changed using pointer to wadfile_info_t
 static void W_AddFile(wadfile_info_t *wadfile)
-// killough 1/31/98: static, const
 {
-  wadinfo_t   header;
-  lumpinfo_t* lump_p;
-  size_t      length;
-  size_t      startlump;
-  filelump_t  *fileinfo, *fileinfo2free=NULL; //killough
-  filelump_t  singleinfo;
+  size_t startlump = numlumps;
+  filelump_t *lumpindex, *fileinfo;
+  wadinfo_t header;
 
-  // open the file and add to directory
-
-  wadfile->handle = fopen(wadfile->name, "rb");
-
-#ifdef HAVE_NET
-  if (!wadfile->handle && D_NetGetWad(wadfile->name)) // CPhipps
+  // If we do not have the whole thing in memory then we open it from disk
+  if (!wadfile->data)
+  {
     wadfile->handle = fopen(wadfile->name, "rb");
+#ifdef HAVE_NET
+    if (!wadfile->handle && D_NetGetWad(wadfile->name)) // CPhipps
+      wadfile->handle = fopen(wadfile->name, "rb");
 #endif
-
-  if (!wadfile->handle)
-    I_Error("W_AddFile: couldn't open %s",wadfile->name);
-
-  //jff 8/3/98 use logical output routine
-  lprintf (LO_INFO," adding %s\n",wadfile->name);
-  startlump = numlumps;
-
-  if (strlen(wadfile->name)<=4 || strcasecmp(wadfile->name+strlen(wadfile->name)-4,".wad"))
+    if (wadfile->handle)
     {
-      // single lump file
-      fileinfo = &singleinfo;
-      singleinfo.filepos = 0;
       fseek(wadfile->handle, 0, SEEK_END);
-      singleinfo.size = ftell(wadfile->handle);
-      fseek(wadfile->handle, 0, SEEK_SET);
-      ExtractFileBase(wadfile->name, singleinfo.name);
-      numlumps++;
+      wadfile->size = ftell(wadfile->handle);
     }
+  }
+
+  if (!wadfile->handle && !wadfile->data)
+    I_Error("W_AddFile: couldn't open %s", wadfile->name);
+
+  W_Read(&header, sizeof(header), 0, wadfile);
+
+  if (strncmp(header.identification, "IWAD", 4) && strncmp(header.identification, "PWAD", 4))
+  {
+    // Assume it's a single lump file
+    lumpindex = fileinfo = malloc(sizeof(filelump_t));
+    fileinfo->size = wadfile->size;
+    fileinfo->filepos = 0;
+    ExtractFileBase(wadfile->name, fileinfo->name);
+    numlumps++;
+  }
   else
-    {
-      // WAD file
-      fread(&header, sizeof(header), 1, wadfile->handle);
-      if (strncmp(header.identification,"IWAD",4) && strncmp(header.identification,"PWAD",4))
-        I_Error("W_AddFile: Wad file %s doesn't have IWAD or PWAD id", wadfile->name);
-      header.numlumps = LONG(header.numlumps);
-      header.infotableofs = LONG(header.infotableofs);
-      length = header.numlumps*sizeof(filelump_t);
-      fileinfo2free = fileinfo = malloc(length);    // killough
-      fseek(wadfile->handle, header.infotableofs, SEEK_SET);
-      fread(fileinfo, length, 1, wadfile->handle);
-      numlumps += header.numlumps;
-    }
+  {
+    // It's a proper WAD file
+    size_t wadlumps = LONG(header.numlumps);
+    size_t length = wadlumps * sizeof(filelump_t);
+    lumpindex = malloc(length);
+    W_Read(lumpindex, length, LONG(header.infotableofs), wadfile);
+    numlumps += wadlumps;
+  }
 
-    // Fill in lumpinfo
-    lumpinfo = realloc(lumpinfo, numlumps*sizeof(lumpinfo_t));
+  // Append the new lumps to lumpinfo
+  lumpinfo = realloc(lumpinfo, numlumps * sizeof(lumpinfo_t));
+  fileinfo = lumpindex;
 
-    lump_p = &lumpinfo[startlump];
+  for (size_t i = startlump; i < numlumps; i++, fileinfo++)
+  {
+    lumpinfo_t *lump_p = &lumpinfo[i];
+    lump_p->wadfile = wadfile;                    //  killough 4/25/98
+    lump_p->position = LONG(fileinfo->filepos);
+    lump_p->size = LONG(fileinfo->size);
+    lump_p->li_namespace = ns_global;              // killough 4/17/98
+    lump_p->locks = 0;
+    lump_p->ptr = NULL;
+    memcpy(lump_p->name, fileinfo->name, 8);
+  }
 
-    for (size_t i = startlump; i < numlumps; i++, lump_p++, fileinfo++)
-      {
-        lump_p->wadfile = wadfile;                    //  killough 4/25/98
-        lump_p->position = LONG(fileinfo->filepos);
-        lump_p->size = LONG(fileinfo->size);
-        lump_p->li_namespace = ns_global;              // killough 4/17/98
-        strncpy (lump_p->name, fileinfo->name, 8);
-      }
+  free(lumpindex);
 
-    free(fileinfo2free);      // killough
+  lprintf(LO_INFO, " added %s:%s (%d lumps)\n",
+    wadfile->data ? "data" : "file",
+    wadfile->name,
+    numlumps - startlump);
 }
 
 // jff 1/23/98 Create routines to reorder the master directory
@@ -208,13 +208,18 @@ static void W_CoalesceMarkedResource(const char *start_marker,
   size_t i, num_marked = 0, num_unmarked = 0;
   int is_marked = 0, mark_end = 0;
   lumpinfo_t *lump = lumpinfo;
+  char start_marker_buf[10], end_marker_buf[10];
+
+  // just to make sure the memcpy below doesn't read out of bounds
+  start_marker = strncpy(start_marker_buf, start_marker, 8);
+  end_marker = strncpy(end_marker_buf, end_marker, 8);
 
   for (i=numlumps; i--; lump++)
     if (IsMarker(start_marker, lump->name))       // start marker found
       { // If this is the first start marker, add start marker to marked lumps
         if (!num_marked)
           {
-            strncpy(marked->name, start_marker, 8);
+            memcpy(marked->name, start_marker, 8);
             marked->size = 0;  // killough 3/20/98: force size to be 0
             marked->li_namespace = ns_global;        // killough 4/17/98
             marked->wadfile = NULL;
@@ -249,7 +254,7 @@ static void W_CoalesceMarkedResource(const char *start_marker,
       lumpinfo[numlumps].size = 0;  // killough 3/20/98: force size to be 0
       lumpinfo[numlumps].wadfile = NULL;
       lumpinfo[numlumps].li_namespace = ns_global;   // killough 4/17/98
-      strncpy(lumpinfo[numlumps++].name, end_marker, 8);
+      memcpy(lumpinfo[numlumps++].name, end_marker, 8);
     }
 }
 
@@ -339,7 +344,6 @@ void W_HashLumps(void)
 // End of lump hashing -- killough 1/31/98
 
 
-
 // W_GetNumForName
 // Calls W_CheckNumForName, but bombs out if not found.
 //
@@ -350,7 +354,6 @@ int W_GetNumForName (const char* name)     // killough -- const added
     I_Error("W_GetNumForName: %.8s not found", name);
   return i;
 }
-
 
 
 // W_Init
@@ -377,22 +380,35 @@ void W_Init(void)
   if (!numlumps)
     I_Error ("W_Init: No files found");
 
-  //jff 1/23/98
-  // get all the sprites and flats into one marked block each
-  // killough 1/24/98: change interface to use M_START/M_END explicitly
-  // killough 4/17/98: Add namespace tags to each entry
-  // killough 4/4/98: add colormap markers
   W_CoalesceMarkedResource("S_START", "S_END", ns_sprites);
   W_CoalesceMarkedResource("F_START", "F_END", ns_flats);
   W_CoalesceMarkedResource("C_START", "C_END", ns_colormaps);
-  W_CoalesceMarkedResource("B_START", "B_END", ns_prboom);
 
-  // killough 1/31/98: initialize lump hash table
   W_HashLumps();
+}
 
-  /* cph 2001/07/07 - separated cache setup */
-  lprintf(LO_INFO,"W_InitCache\n");
-  W_InitCache();
+//
+// W_Read
+// Read arbitrary data from the WAD file
+//
+int W_Read(void *dest, size_t size, size_t offset, wadfile_info_t *wad)
+{
+  if (offset >= wad->size)
+  {
+    lprintf(LO_WARN, "W_Read: offset %d > %d\n", offset, wad->size);
+  }
+  else if (wad->data)
+  {
+    memcpy(dest, wad->data + offset, size);
+    return size;
+  }
+  else if (wad->handle)
+  {
+    fseek(wad->handle, offset, SEEK_SET);
+    fread(dest, size, 1, wad->handle);
+    return size;
+  }
+  return -1;
 }
 
 //
@@ -401,10 +417,9 @@ void W_Init(void)
 //
 int W_LumpLength(int lump)
 {
-#ifdef RANGECHECK
-  if ((unsigned)lump >= (unsigned)numlumps)
-    I_Error ("W_LumpLength: %i >= numlumps",lump);
-#endif
+  if ((unsigned)lump >= numlumps)
+    I_Error("W_LumpLength: index out of bounds");
+
   return lumpinfo[lump].size;
 }
 
@@ -413,17 +428,55 @@ int W_LumpLength(int lump)
 // Loads the lump into the given buffer,
 //  which must be >= W_LumpLength().
 //
-void W_ReadLump(int lump, void *dest)
+void W_ReadLump(void *dest, int lump)
 {
-#ifdef RANGECHECK
-  if ((unsigned)lump >= (unsigned)numlumps)
-    I_Error ("W_ReadLump: %i >= numlumps",lump);
-#endif
+  if ((unsigned)lump >= numlumps)
+    I_Error("W_ReadLump: index out of bounds");
+
   lumpinfo_t *l = lumpinfo + lump;
   if (l->wadfile)
   {
-    fseek(l->wadfile->handle, l->position, SEEK_SET);
-    fread(dest, l->size, 1, l->wadfile->handle);
+    W_Read(dest, l->size, l->position, l->wadfile);
   }
 }
 
+//
+// W_CacheLumpNum
+//
+const void *W_CacheLumpNum(int lump)
+{
+  if ((unsigned)lump >= numlumps)
+    I_Error("W_CacheLumpNum: index out of bounds");
+
+  lumpinfo_t *l = &lumpinfo[lump];
+
+  if (!l->ptr)
+  {
+    // Bypass caching if we have the WAD mapped in memory
+    if (l->wadfile && l->wadfile->data)
+      return l->wadfile->data + l->position;
+    W_ReadLump(Z_Malloc(W_LumpLength(lump), PU_STATIC, &l->ptr), lump);
+    l->locks = 0;
+  }
+
+  if (++l->locks == 1)
+  {
+    Z_ChangeTag(l->ptr, PU_STATIC);
+    l->locks = 1;
+  }
+
+  return l->ptr;
+}
+
+//
+// W_UnlockLumpNum
+//
+void W_UnlockLumpNum(int lump)
+{
+  if ((unsigned)lump >= numlumps)
+    I_Error("W_UnlockLumpNum: index out of bounds");
+
+  lumpinfo_t *l = &lumpinfo[lump];
+  if (l->ptr && l->locks && --l->locks == 0)
+    Z_ChangeTag(l->ptr, PU_CACHE);
+}

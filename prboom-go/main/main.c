@@ -50,11 +50,10 @@ static rg_video_update_t update;
 static rg_app_t *app;
 
 // Expected variables by doom
-int ms_to_next_tick = 0;
 int snd_card = 1, mus_card = 1;
 int snd_samplerate = SAMPLERATE;
 int realtic_clock_rate = 100;
-int (*I_GetTime)(void) = I_GetTime_RealTime;
+int current_palette = 0;
 
 static struct {
     uint8_t *data;   // Sample
@@ -70,27 +69,51 @@ static short mixbuffer[SAMPLECOUNT * 2];
 static const music_player_t *music_player = &opl_synth_player;
 static bool musicPlaying = false;
 
-static int key_yes = 'y';
-static int key_no = 'n';
+// TO DO: Detect when menu is open so we can send better keys.
 
 static const struct {int mask; int *key;} keymap[] = {
     {RG_KEY_UP, &key_up},
     {RG_KEY_DOWN, &key_down},
     {RG_KEY_LEFT, &key_left},
     {RG_KEY_RIGHT, &key_right},
-    {RG_KEY_A, &key_yes},
     {RG_KEY_A, &key_fire},
     {RG_KEY_A, &key_menu_enter},
-    {RG_KEY_B, &key_no},
     {RG_KEY_B, &key_speed},
     {RG_KEY_B, &key_strafe},
-    {RG_KEY_B, &key_menu_backspace},
+    {RG_KEY_B, &key_backspace},
     {RG_KEY_MENU, &key_escape},
-    // {RG_KEY_OPTION, &key_map},
-    {RG_KEY_OPTION, &key_escape},
+    {RG_KEY_OPTION, &key_map},
     {RG_KEY_START, &key_use},
     {RG_KEY_SELECT, &key_weapontoggle},
 };
+
+static const char *SETTING_GAMMA = "Gamma";
+
+
+static dialog_return_t gamma_update_cb(dialog_option_t *option, dialog_event_t event)
+{
+    int gamma = usegamma;
+    int max = 9;
+
+    if (event == RG_DIALOG_PREV)
+        gamma = gamma > 0 ? gamma - 1 : max;
+
+    if (event == RG_DIALOG_NEXT)
+        gamma = gamma < max ? gamma + 1 : 0;
+
+    if (gamma != usegamma)
+    {
+        usegamma = gamma;
+        I_SetPalette(current_palette);
+        rg_display_queue_update(&update, NULL);
+        rg_settings_set_app_int32(SETTING_GAMMA, gamma);
+        usleep(50000);
+    }
+
+    sprintf(option->value, "%d/%d", gamma, max);
+
+    return RG_DIALOG_IGNORE;
+}
 
 
 void I_StartFrame(void)
@@ -120,18 +143,14 @@ void I_EndDisplay(void)
 
 void I_SetPalette(int pal)
 {
-    int pplump = W_GetNumForName("PLAYPAL");
-    const byte *palette = W_CacheLumpNum(pplump) + (pal * 3 * 256);
-    for (int i = 0; i < 255; i++)
-    {
-        unsigned v = ((palette[0] >> 3) << 11) + ((palette[1] >> 2) << 5) + (palette[2] >> 3);
-        update.palette[i] = (v << 8) | (v >> 8);
-        palette += 3;
-    }
-    W_UnlockLumpNum(pplump);
+    uint16_t *palette = V_BuildPalette(pal, 16);
+    for (int i = 0; i < 256; i++)
+        update.palette[i] = palette[i] << 8 | palette[i] >> 8;
+    Z_Free(palette);
+    current_palette = pal;
 }
 
-void I_SetRes(void)
+void I_InitGraphics(void)
 {
     // set first three to standard values
     for (int i = 0; i < 3; i++)
@@ -153,53 +172,14 @@ void I_SetRes(void)
     rg_display_set_source_format(SCREENWIDTH, SCREENHEIGHT, 0, 0, SCREENWIDTH, RG_PIXEL_PAL565_BE);
 }
 
-void I_InitGraphics(void)
+int I_GetTimeMS(void)
 {
-    V_InitMode(VID_MODE8);
-    V_FreeScreens();
-    I_SetRes();
-    V_AllocScreens();
-    R_InitBuffer(SCREENWIDTH, SCREENHEIGHT);
+    return esp_timer_get_time() / 1000;
 }
 
-int I_GetTime_RealTime(void)
+int I_GetTime(void)
 {
     return ((esp_timer_get_time() * TICRATE) / 1000000);
-}
-
-int I_GetTimeFrac(void)
-{
-    unsigned long now;
-    fixed_t frac;
-
-    now = esp_timer_get_time() / 1000;
-
-    if (tic_vars.step == 0)
-        return FRACUNIT;
-    else
-    {
-        frac = (fixed_t)((now - tic_vars.start) * FRACUNIT / tic_vars.step);
-        if (frac < 0)
-            frac = 0;
-        if (frac > FRACUNIT)
-            frac = FRACUNIT;
-        return frac;
-    }
-}
-
-void I_GetTime_SaveMS(void)
-{
-    if (!movement_smooth)
-        return;
-
-    tic_vars.start = esp_timer_get_time() / 1000;
-    tic_vars.next = (unsigned int)((tic_vars.start * tic_vars.msec + 1.0f) / tic_vars.msec);
-    tic_vars.step = tic_vars.next - tic_vars.start;
-}
-
-unsigned long I_GetRandomTimeSeed(void)
-{
-    return 4; //per https://xkcd.com/221/
 }
 
 void I_uSleep(unsigned long usecs)
@@ -210,29 +190,6 @@ void I_uSleep(unsigned long usecs)
 const char *I_DoomExeDir(void)
 {
     return RG_BASE_PATH_ROMS "/doom";
-}
-
-char *I_FindFile(const char *fname, const char *ext)
-{
-    char filepath[PATH_MAX + 1];
-
-    // Absolute path
-    if (fname[0] == '/' && access(fname, R_OK) != -1)
-    {
-        RG_LOGI("Found %s... ", fname);
-        return strdup(fname);
-    }
-
-    // Relative path
-    snprintf(filepath, PATH_MAX, "%s/%s", I_DoomExeDir(), fname);
-    if (access(filepath, R_OK) != -1)
-    {
-        RG_LOGI("Found: %s\n", filepath);
-        return strdup(filepath);
-    }
-
-    RG_LOGI("Not found: %s.\n");
-    return NULL;
 }
 
 void I_UpdateSoundParams(int handle, int volume, int seperation, int pitch)
@@ -359,35 +316,20 @@ static void soundTask(void *arg)
 
 void I_InitSound(void)
 {
-    RG_LOGI("called\n");
-
     for (int i = 1; i < NUMSFX; i++)
     {
-        // Map unknown sounds to pistol
         if (S_sfx[i].lumpnum == -1)
+            sfx[i] = sfx[1]; // Map unknown sounds to pistol
+        else
         {
-            sfx[i] = sfx[1];
-            continue;
+            size_t size = W_LumpLength(S_sfx[i].lumpnum);
+            sfx[i].length = ((size + (SAMPLECOUNT - 1)) / SAMPLECOUNT) * SAMPLECOUNT;
+            sfx[i].data = Z_Malloc(sfx[i].length, PU_SOUND, 0);
+            W_ReadLump(sfx[i].data, S_sfx[i].lumpnum);
+            memset(sfx[i].data + size, 0x80, sfx[i].length - size);
         }
-
-        int sfxlump = S_sfx[i].lumpnum;
-        const void *data = W_CacheLumpNum(sfxlump) + 8;
-        size_t size = W_LumpLength(sfxlump) - 8;
-
-        // Pads the sound effect out to the mixing buffer size.
-        size_t paddedsize = ((size + (SAMPLECOUNT - 1)) / SAMPLECOUNT) * SAMPLECOUNT;
-        void *paddedsfx = Z_Malloc(paddedsize, PU_SOUND, 0);
-
-        memcpy(paddedsfx, data, size);
-        memset(paddedsfx + size, 0x80, paddedsize - size);
-
-        sfx[i].data = paddedsfx;
-        sfx[i].length = paddedsize;
-
-        W_UnlockLumpNum(sfxlump);
-        Z_FreeTags(PU_CACHE, PU_CACHE);
     }
-    RG_LOGI("pre-cached all sound data!\n");
+    RG_LOGI("all sound effects loaded.\n");
 
     music_player->init(snd_samplerate);
     music_player->setvolume(snd_MusicVolume);
@@ -490,6 +432,7 @@ void I_StartTic(void)
     if (joystick & RG_KEY_OPTION)
     {
         rg_gui_game_settings_menu();
+        // realtic_clock_rate = (app->speedupEnabled + 1) * 100;
     }
     else if (changed)
     {
@@ -515,11 +458,12 @@ void I_Init(void)
     snd_samplerate = SAMPLERATE;
     snd_MusicVolume = 15;
     snd_SfxVolume = 15;
-    R_InitInterpolation();
+    usegamma = rg_settings_get_app_int32(SETTING_GAMMA, 0);
 }
 
 static bool screenshot_handler(const char *filename, int width, int height)
 {
+    Z_FreeTags(PU_CACHE, PU_CACHE); // At this point the heap is usually full. Let's reclaim some!
 	return rg_display_save_frame(filename, &update, width, height);
 }
 
@@ -540,7 +484,11 @@ static bool reset_handler(bool hard)
 
 static void settings_handler(void)
 {
-    return;
+    dialog_option_t options[] = {
+        {100, "Gamma Boost", "0/5", 1, &gamma_update_cb},
+        RG_DIALOG_CHOICE_LAST
+    };
+    rg_gui_dialog("Advanced", options, 0);
 }
 
 static void event_handler(int event, void *arg)
@@ -549,7 +497,7 @@ static void event_handler(int event, void *arg)
     {
         // DOOM fully fills the internal heap and this causes some shutdown
         // steps to fail so we try to free everything!
-        Z_FreeTags(PU_STATIC, PU_CACHE);
+        Z_FreeTags(0, PU_MAX);
         rg_audio_set_mute(true);
     }
     return;

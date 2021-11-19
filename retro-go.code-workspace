@@ -78,6 +78,10 @@
 		"files.exclude": {
 			"**/build": true,
 			"root": true
+		},
+		"files.watcherExclude": {
+			"**/build/**": true,
+			"**/.git/**": true
 		}
 	}
 }
