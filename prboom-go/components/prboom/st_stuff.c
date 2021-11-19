@@ -375,8 +375,6 @@ static int      keyboxes[3];
 // a random number per tick
 static int      st_randomnumber;
 
-extern char     *mapnames[];
-
 //
 // STATUS BAR CODE
 //

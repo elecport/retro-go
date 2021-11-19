@@ -306,6 +306,7 @@ void R_ResetColumnBuffer(void)
 //  be used. It has also been used with Wolfenstein 3D.
 //
 
+byte playernumtotrans[MAXPLAYERS];
 byte *translationtables;
 
 #define R_DRAWCOLUMN_PIPELINE_TYPE RDC_PIPELINE_STANDARD
@@ -703,9 +704,6 @@ void R_SetDefaultDrawColumnVars(draw_column_vars_t *dcvars) {
 // Assumes a given structure of the PLAYPAL.
 // Could be read from a lump instead.
 //
-
-byte playernumtotrans[MAXPLAYERS];
-extern lighttable_t *(*c_zlight)[LIGHTLEVELS][MAXLIGHTZ];
 
 void R_InitTranslationTables (void)
 {

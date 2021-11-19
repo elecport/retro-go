@@ -8,9 +8,6 @@
 /* Define to 1 if you have the `getopt' function. */
 //#undef HAVE_GETOPT
 
-/* Define to 1 if you have the <unistd.h> header file. */
-#define HAVE_UNISTD_H 1
-
 /* Uncomment this to cause heap dumps to be generated. Only useful if
    INSTRUMENTED is also defined. */
 /* #undef HEAPDUMP */
@@ -52,11 +49,14 @@
    illegally freed blocks */
 #define ZONEIDCHECK
 
-/* Disable DEH support */
+/* Define to remove DEH support */
 #define NODEHSUPPORT
 
-/* Disable true color support (support palette only) */
+/* Define to remove true color support (keep 8bit palette only) */
 #define NOTRUECOLOR
+
+/* Define to bundle prboom.wad (minus the trig tables, which we always include) */
+#define PRBOOMWAD
 
 /* Define to strcasecmp, if we have it */
 #define stricmp strcasecmp
